@@ -1,10 +1,13 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Jellyfin.Data.Entities.Libraries;
 using MediaBrowser.Common.Net;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.TV;
@@ -13,7 +16,7 @@ using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Providers;
 using Microsoft.Extensions.Logging;
 using TvDbSharper;
-using TvDbSharper.Dto;
+using Episode = MediaBrowser.Controller.Entities.TV.Episode;
 
 namespace Jellyfin.Plugin.Tvdb.Providers
 {
@@ -180,8 +183,11 @@ namespace Jellyfin.Plugin.Tvdb.Providers
                     Convert.ToInt32(episodeTvdbId, CultureInfo.InvariantCulture),
                     searchInfo.MetadataLanguage,
                     cancellationToken).ConfigureAwait(false);
+                var episodeName = await _tvdbClientManager
+                        .GetEpisodeNameTranslationForLanguage((int)episodeResult.Data.Id, searchInfo.MetadataLanguage, cancellationToken)
+                        .ConfigureAwait(false);
 
-                result = MapEpisodeToResult(searchInfo, episodeResult.Data);
+                result = MapEpisodeToResult(searchInfo, episodeResult.Data, episodeName.Data.Name);
             }
             catch (TvDbServerException e)
             {
@@ -196,8 +202,13 @@ namespace Jellyfin.Plugin.Tvdb.Providers
             return result;
         }
 
-        private static MetadataResult<Episode> MapEpisodeToResult(EpisodeInfo id, EpisodeRecord episode)
+        private static MetadataResult<Episode> MapEpisodeToResult(EpisodeInfo id, EpisodeExtendedRecordDto episode, string episodeName)
         {
+            if (episode == null)
+            {
+                throw new ArgumentNullException(nameof(episode));
+            }
+
             var result = new MetadataResult<Episode>
             {
                 HasMetadata = true,
@@ -209,116 +220,128 @@ namespace Jellyfin.Plugin.Tvdb.Providers
                     AirsBeforeEpisodeNumber = episode.AirsBeforeEpisode,
                     AirsAfterSeasonNumber = episode.AirsAfterSeason,
                     AirsBeforeSeasonNumber = episode.AirsBeforeSeason,
-                    Name = episode.EpisodeName,
+                    Name = episode.Name,
                     Overview = episode.Overview,
-                    CommunityRating = (float?)episode.SiteRating,
-                    OfficialRating = episode.ContentRating,
+                    OfficialRating = episode?.ContentRatings?.FirstOrDefault()?.ContentType != null ? episode.ContentRatings?.FirstOrDefault()?.ContentType : string.Empty
                 }
             };
             result.ResetPeople();
 
             var item = result.Item;
-            item.SetProviderId(TvdbPlugin.ProviderId, episode.Id.ToString(CultureInfo.InvariantCulture));
-            item.SetProviderId(MetadataProvider.Imdb, episode.ImdbId);
+            item.SetProviderId(TvdbPlugin.ProviderId, episode?.Id.ToString(CultureInfo.InvariantCulture));
+            if (episode?.RemoteIds != null)
+            {
+                var imdbId = episode.RemoteIds.Where(x => x.SourceName != null && x.SourceName.Equals("IMDB", StringComparison.Ordinal)).FirstOrDefault();
+                if (imdbId != null)
+                {
+                    item.SetProviderId(MediaBrowser.Model.Entities.MetadataProvider.Imdb, imdbId.SourceName);
+                }
+            }
 
             if (string.Equals(id.SeriesDisplayOrder, "dvd", StringComparison.OrdinalIgnoreCase))
             {
-                item.IndexNumber = Convert.ToInt32(episode.DvdEpisodeNumber ?? episode.AiredEpisodeNumber, CultureInfo.InvariantCulture);
-                item.ParentIndexNumber = episode.DvdSeason ?? episode.AiredSeason;
+                item.IndexNumber = Convert.ToInt32(episode?.Number ?? episode?.Number, CultureInfo.InvariantCulture);
+                item.ParentIndexNumber = episode?.SeasonNumber ?? episode?.SeasonNumber;
             }
             else if (string.Equals(id.SeriesDisplayOrder, "absolute", StringComparison.OrdinalIgnoreCase))
             {
-                if (episode.AbsoluteNumber.GetValueOrDefault() != 0)
+                if (episode?.Number != 0)
                 {
-                    item.IndexNumber = episode.AbsoluteNumber;
+                    item.IndexNumber = episode?.Number;
                 }
             }
-            else if (episode.AiredEpisodeNumber.HasValue)
+            else if (episode?.Number != 0)
             {
-                item.IndexNumber = episode.AiredEpisodeNumber;
+                item.IndexNumber = episode?.Number;
             }
-            else if (episode.AiredSeason.HasValue)
+            else if (episode.SeasonNumber != 0)
             {
-                item.ParentIndexNumber = episode.AiredSeason;
+                item.ParentIndexNumber = episode.SeasonNumber;
             }
 
-            if (DateTime.TryParse(episode.FirstAired, out var date))
+            if (DateTime.TryParse(episode?.Aired, out var date))
             {
                 // dates from tvdb are UTC but without offset or Z
                 item.PremiereDate = date;
                 item.ProductionYear = date.Year;
             }
 
-            foreach (var director in episode.Directors)
+            if (episode != null && episode.Characters != null)
             {
-                result.AddPerson(new PersonInfo
-                {
-                    Name = director,
-                    Type = PersonType.Director
-                });
-            }
-
-            // GuestStars is a weird list of names and roles
-            // Example:
-            // 1: Some Actor (Role1
-            // 2: Role2
-            // 3: Role3)
-            // 4: Another Actor (Role1
-            // ...
-            for (var i = 0; i < episode.GuestStars.Length; ++i)
-            {
-                var currentActor = episode.GuestStars[i];
-                var roleStartIndex = currentActor.IndexOf('(', StringComparison.Ordinal);
-
-                if (roleStartIndex == -1)
+                foreach (var director in episode.Characters.Where(x => x.PeopleType.Equals("Director", StringComparison.Ordinal)))
                 {
                     result.AddPerson(new PersonInfo
                     {
-                        Type = PersonType.GuestStar,
-                        Name = currentActor,
-                        Role = string.Empty
+                        Name = director.PersonName,
+                        Type = PersonType.Director
                     });
-                    continue;
                 }
 
-                var roles = new List<string> { currentActor.Substring(roleStartIndex + 1) };
-
-                // Fetch all roles
-                for (var j = i + 1; j < episode.GuestStars.Length; ++j)
+                // GuestStars is a weird list of names and roles
+                // Example:
+                // 1: Some Actor (Role1
+                // 2: Role2
+                // 3: Role3)
+                // 4: Another Actor (Role1
+                // ...
+                var guestStars = episode.Characters.Where(x => x.PeopleType.Equals("Guest Star", StringComparison.Ordinal)).ToArray();
+                for (int i = 0; i < guestStars.Length; i++)
                 {
-                    var currentRole = episode.GuestStars[j];
-                    var roleEndIndex = currentRole.Contains(')', StringComparison.Ordinal);
+                    var guestStar = guestStars[i];
+                    var currentActor = guestStar.PersonName;
+                    var roleStartIndex = currentActor.IndexOf('(', StringComparison.Ordinal);
 
-                    if (!roleEndIndex)
+                    if (roleStartIndex == -1)
                     {
-                        roles.Add(currentRole);
+                        result.AddPerson(new PersonInfo
+                        {
+                            Type = PersonType.GuestStar,
+                            Name = currentActor,
+                            Role = string.Empty
+                        });
                         continue;
                     }
 
-                    roles.Add(currentRole.TrimEnd(')'));
-                    // Update the outer index (keep in mind it adds 1 after the iteration)
-                    i = j;
-                    break;
+                    var roles = new List<string> { currentActor.Substring(roleStartIndex + 1) };
+
+                    // Fetch all roles
+                    for (int j = 0; j < guestStars.Length; j++)
+                    {
+                        var guestStarSecondary = guestStars[j];
+                        var currentRole = guestStarSecondary.PersonName;
+                        var roleEndIndex = currentRole.Contains(')', StringComparison.Ordinal);
+
+                        if (!roleEndIndex)
+                        {
+                            roles.Add(currentRole);
+                            continue;
+                        }
+
+                        roles.Add(currentRole.TrimEnd(')'));
+                        // Update the outer index (keep in mind it adds 1 after the iteration)
+                        i = j;
+                        break;
+                    }
+
+                    result.AddPerson(new PersonInfo
+                    {
+                        Type = PersonType.GuestStar,
+                        Name = currentActor.Substring(0, roleStartIndex).Trim(),
+                        Role = string.Join(", ", roles)
+                    });
                 }
 
-                result.AddPerson(new PersonInfo
+                foreach (var writer in episode.Characters.Where(x => x.PeopleType.Equals("Writer", StringComparison.Ordinal)))
                 {
-                    Type = PersonType.GuestStar,
-                    Name = currentActor.Substring(0, roleStartIndex).Trim(),
-                    Role = string.Join(", ", roles)
-                });
+                    result.AddPerson(new PersonInfo
+                    {
+                        Name = writer.PersonName,
+                        Type = PersonType.Writer
+                    });
+                }
             }
 
-            foreach (var writer in episode.Writers)
-            {
-                result.AddPerson(new PersonInfo
-                {
-                    Name = writer,
-                    Type = PersonType.Writer
-                });
-            }
-
-            result.ResultLanguage = episode.Language.EpisodeName;
+            result.ResultLanguage = episodeName;
             return result;
         }
 

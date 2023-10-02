@@ -1,5 +1,8 @@
-﻿using System;
+using System;
+using System.Collections.Generic;
+using System.Linq;
 using MediaBrowser.Model.Entities;
+using TvDbSharper;
 
 namespace Jellyfin.Plugin.Tvdb
 {
@@ -22,17 +25,23 @@ namespace Jellyfin.Plugin.Tvdb
         /// Get image type from key type.
         /// </summary>
         /// <param name="keyType">Key type.</param>
+        /// <param name="artworkTypes">Input list of artwork types.</param>
         /// <returns>Image type.</returns>
         /// <exception cref="ArgumentException">Unknown key type.</exception>
-        public static ImageType GetImageTypeFromKeyType(string keyType)
+        public static ImageType GetArtworkTypeFromKeyType(long keyType, ArtworkTypeDto[] artworkTypes)
         {
-            switch (keyType.ToLowerInvariant())
+            switch (artworkTypes?.FirstOrDefault(x => x.Id == keyType)?.Name.ToLowerInvariant())
             {
-                case "poster":
-                case "season": return ImageType.Primary;
-                case "series":
-                case "seasonwide": return ImageType.Banner;
-                case "fanart": return ImageType.Backdrop;
+                case "Background":
+                    return ImageType.Backdrop;
+                case "Icon":
+                    return ImageType.Thumb;
+                case "Poster":
+                    return ImageType.Primary;
+                case "Banner":
+                    return ImageType.Banner;
+                case "ClearLogo":
+                    return ImageType.Logo;
                 default: throw new ArgumentException($"Invalid or unknown keytype: {keyType}", nameof(keyType));
             }
         }

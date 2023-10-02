@@ -12,7 +12,6 @@ using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Providers;
 using Microsoft.Extensions.Logging;
 using TvDbSharper;
-using TvDbSharper.Dto;
 using RatingType = MediaBrowser.Model.Dto.RatingType;
 using Series = MediaBrowser.Controller.Entities.TV.Series;
 
@@ -68,21 +67,21 @@ namespace Jellyfin.Plugin.Tvdb.Providers
             var language = item.GetPreferredMetadataLanguage();
             var remoteImages = new List<RemoteImageInfo>();
             var tvdbId = Convert.ToInt32(item.GetProviderId(TvdbPlugin.ProviderId), CultureInfo.InvariantCulture);
-            var allowedKeyTypes = _tvdbClientManager.GetImageKeyTypesForSeriesAsync(tvdbId, language, cancellationToken)
+            var allowedKeyTypes = _tvdbClientManager.GetArtworkKeyTypesForSeriesAsync(tvdbId, language, cancellationToken)
                 .ConfigureAwait(false);
-            await foreach (KeyType keyType in allowedKeyTypes)
+            await foreach (var keyType in allowedKeyTypes)
             {
-                var imageQuery = new ImagesQuery
+                var imageQuery = new SeriesArtworksOptionalParams
                 {
-                    KeyType = keyType
+                    Type = (int)keyType.Id,
+                    Lang = language
                 };
                 try
                 {
-                    var imageResults =
-                        await _tvdbClientManager.GetImagesAsync(tvdbId, imageQuery, language, cancellationToken)
-                            .ConfigureAwait(false);
+                    var imageResults = _tvdbClientManager.GetImagesAsync(tvdbId, imageQuery, language, cancellationToken);
+                    var imagesToAdd = await GetImages(item, cancellationToken).ConfigureAwait(false);
 
-                    remoteImages.AddRange(GetImages(imageResults.Data, language));
+                    remoteImages.AddRange(imagesToAdd);
                 }
                 catch (TvDbServerException)
                 {
@@ -97,32 +96,28 @@ namespace Jellyfin.Plugin.Tvdb.Providers
             return remoteImages;
         }
 
-        private IEnumerable<RemoteImageInfo> GetImages(Image[] images, string preferredLanguage)
+        private async Task<IEnumerable<RemoteImageInfo>> GetImages(ArtworkExtendedRecordDto[] images, string preferredLanguage, CancellationToken cancellationToken)
         {
             var list = new List<RemoteImageInfo>();
             var languages = _tvdbClientManager.GetLanguagesAsync(CancellationToken.None).Result.Data;
+            var artworkTypes = await _tvdbClientManager.GetArtworkTypes(preferredLanguage, cancellationToken).ConfigureAwait(false);
 
-            foreach (Image image in images)
+            foreach (var image in images)
             {
                 var imageInfo = new RemoteImageInfo
                 {
                     RatingType = RatingType.Score,
-                    CommunityRating = (double?)image.RatingsInfo.Average,
-                    VoteCount = image.RatingsInfo.Count,
-                    Url = TvdbUtils.BannerUrl + image.FileName,
+                    VoteCount = image.Score,
+                    Url = image.Image,
                     ProviderName = Name,
-                    Language = languages.FirstOrDefault(lang => lang.Id == image.LanguageId)?.Abbreviation,
+                    Language = languages.FirstOrDefault(lang => lang.Id == image.Language)?.Id,
                     ThumbnailUrl = TvdbUtils.BannerUrl + image.Thumbnail
                 };
 
-                var resolution = image.Resolution.Split('x');
-                if (resolution.Length == 2)
-                {
-                    imageInfo.Width = Convert.ToInt32(resolution[0], CultureInfo.InvariantCulture);
-                    imageInfo.Height = Convert.ToInt32(resolution[1], CultureInfo.InvariantCulture);
-                }
+                imageInfo.Width = Convert.ToInt32(image.Width, CultureInfo.InvariantCulture);
+                imageInfo.Height = Convert.ToInt32(image.Height, CultureInfo.InvariantCulture);
 
-                imageInfo.Type = TvdbUtils.GetImageTypeFromKeyType(image.KeyType);
+                imageInfo.Type = TvdbUtils.GetArtworkTypeFromKeyType(image.Type, artworkTypes.Data);
                 list.Add(imageInfo);
             }
 

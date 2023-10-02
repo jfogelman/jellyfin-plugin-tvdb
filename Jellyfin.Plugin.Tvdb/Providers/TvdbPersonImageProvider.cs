@@ -76,11 +76,11 @@ namespace Jellyfin.Plugin.Tvdb.Providers
                 .ToList();
 
             var infos = (await Task.WhenAll(seriesWithPerson.Select(async i =>
-                        await GetImageFromSeriesData(i, item.Name, cancellationToken).ConfigureAwait(false)))
-                    .ConfigureAwait(false))
-                .Where(i => i != null)
-                .Cast<RemoteImageInfo>()
-                .Take(1);
+                         await GetImageFromSeriesData(i, item.Name, cancellationToken).ConfigureAwait(false)))
+                     .ConfigureAwait(false))
+                 .Where(i => i != null)
+                 .Cast<RemoteImageInfo>()
+                 .Take(1);
 
             return infos;
         }
@@ -98,9 +98,8 @@ namespace Jellyfin.Plugin.Tvdb.Providers
             try
             {
                 var actorsResult = await _tvdbClientManager
-                    .GetActorsAsync(tvdbId, series.GetPreferredMetadataLanguage(), cancellationToken)
-                    .ConfigureAwait(false);
-                var actor = actorsResult.Data.FirstOrDefault(a =>
+                    .GetActorsAsync(tvdbId, series.GetPreferredMetadataLanguage(), cancellationToken).ConfigureAwait(false);
+                var actor = actorsResult.FirstOrDefault(a =>
                     string.Equals(a.Name, personName, StringComparison.OrdinalIgnoreCase) &&
                     !string.IsNullOrEmpty(a.Image));
                 if (actor == null)
